@@ -1,5 +1,11 @@
+venv/
 __pycache__/
 *.pyc
 .env
-venv/
-.DS_Store
+*.pdf
+*.jpg
+*.png
+data/output/
+data/test/*.json
+*.xlsx
+*.csv
