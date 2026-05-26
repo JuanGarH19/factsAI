@@ -3,50 +3,6 @@ extractor.py  ·  FacturaIA v2
 ------------------------------
 Extractor de datos fiscales de facturas de proveedores para el mercado español.
 
-Mejoras v2 respecto a v1
--------------------------
-  [1] IRPF / retención — nuevos campos `retencion_irpf` + `tipo_retencion`.
-      total_factura = base + IVA - retención. El validador lo comprueba.
-
-  [2] Multi-IVA — nuevo campo `lineas_iva` (lista de tramos base/tipo/cuota).
-      tipo_iva y cuota_iva siguen como resumen de compatibilidad.
-
-  [3] OCR mejorado — preprocesado de imagen con OpenCV antes de Tesseract:
-        · reescalado si la imagen es < ANCHO_MIN_OCR píxeles
-        · conversión a escala de grises
-        · denoising (fastNlMeans)
-        · umbralización adaptativa (Otsu)
-        · corrección de orientación automática (deskew vía Tesseract OSD)
-        · fallback a imagen original si el preprocesado produce poco texto
-
-  [4] Extracción de tablas PDF — pdfplumber ahora usa extract_tables()
-      además del texto plano; las tablas se adjuntan al prompt, mejorando
-      la lectura de importes en columnas.
-
-  [5] Fechas flexibles — el validador normaliza DD/MM/YYYY, DD-MM-YYYY,
-      "15 de marzo de 2024", "marzo 2024", antes de validar ISO 8601.
-
-  [6] Prompt reforzado — reglas explícitas para IRPF, multi-IVA, autónomos,
-      lista de CIFs de proveedores conocidos ampliada.
-
-  [7] Coherencia aritmética — detecta base+IVA-retención ≠ total con
-      tolerancia de 0,05 €. Calcula cuota automáticamente si falta.
-
-  [8] max_tokens subido a 1500 — necesario para el JSON con lineas_iva.
-
-  [9] Reintentos API: 3 intentos (antes 2) con back-off en JSON malformado.
-
-  [10] Truncado inteligente — conserva cabecera (HEAD_CHARS) + pie (TAIL_CHARS)
-       en lugar de cortar en crudo, preservando NIF, IBAN y totales.
-
-  [11] import numpy eliminado de _comprobar_coherencia (era innecesario).
-
-Flujo de detección automática
-------------------------------
-  JPG/PNG/BMP/TIFF  →  OpenCV preprocesado  →  OCR Tesseract  →  LLM
-  PDF texto digital  →  pdfplumber (texto + tablas)             →  LLM
-  PDF escaneado      →  OpenCV preprocesado  →  OCR Tesseract  →  LLM
-
 Motor LLM: Groq (llama-3.3-70b-versatile) — gratuito en desarrollo.
 
 Uso básico
@@ -158,6 +114,39 @@ REGLAS GENERALES
 9.  Normaliza el nombre del emisor (razón social oficial).
 
 ════════════════════════════════════════════
+REGLAS ANTI-ALUCINACIÓN — OBLIGATORIAS
+════════════════════════════════════════════
+Estas reglas tienen PRIORIDAD ABSOLUTA sobre cualquier otra instrucción.
+
+NIF/CIF:
+- Si NO ves un NIF o CIF escrito explícitamente en el texto, devuelve null.
+- NUNCA construyas, calcules ni deduzcas un NIF. NUNCA uses datos del receptor
+  (nombre, dirección) como si fueran del emisor.
+- Un NIF inventado es SIEMPRE peor que un null.
+
+Nombre del emisor:
+- Usa SOLO el nombre o razón social que aparezca escrito como texto.
+- Si el nombre del proveedor aparece como logotipo o imagen (no como texto
+  extraído), devuelve null o el texto más cercano al logo, no la dirección.
+- NUNCA uses el nombre del receptor o de la dirección de entrega como
+  nombre del emisor.
+
+Importes:
+- Antes de devolver cualquier importe, comprueba que base + IVA ≈ total.
+- Si el total no cuadra con base + IVA (diferencia > 0.10 €), revisa los
+  números: es probable que hayas leído mal un decimal (ej: 51,10 → 510).
+- En caso de duda entre dos lecturas posibles de un número, elige la que
+  hace que base + IVA = total.
+- Si aun así no cuadra, devuelve el total tal como aparece y añade una
+  nota en el campo "notas" explicando la incoherencia.
+
+Confianza interna:
+- Si has devuelto null en nif_emisor O en nombre_emisor porque no estaban
+  claros, añade en "notas": "NIF no visible en el documento" o
+  "Nombre del emisor no legible".
+- Si un importe te genera duda, añádelo también en "notas".
+
+════════════════════════════════════════════
 IVA — REGLAS CRÍTICAS
 ════════════════════════════════════════════
 - tipo_iva: entero representativo del tramo principal (21, 10, 4 o 0).
@@ -214,6 +203,18 @@ FACTURAS DE AUTÓNOMOS — CHECKLIST
 ✓ Suelen incluir retención IRPF (15% general, 7% primeros 3 años).
 ✓ total = base + IVA - retención.
 ✓ nombre_emisor puede ser el nombre completo de la persona, no empresa.
+
+════════════════════════════════════════════
+FACTURAS CON LOGO COMO NOMBRE DE PROVEEDOR
+════════════════════════════════════════════
+Algunas facturas muestran el nombre del proveedor solo como imagen/logo,
+sin texto extraíble. En ese caso:
+- Busca el nombre en el pie de página, en el texto del email o web
+  (ej: "tienda.parislibreria.es" → "Librería París").
+- Si no encuentras ningún texto que sea claramente el nombre comercial,
+  devuelve null en nombre_emisor y explícalo en notas.
+- NUNCA uses la dirección postal ni el nombre del receptor como nombre_emisor.
+
 """
 
 USER_PROMPT_TEMPLATE = """Extrae todos los datos fiscales de la siguiente factura.

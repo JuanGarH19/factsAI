@@ -37,7 +37,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from extractor import (
+from .extractor import (
     EXTENSIONES_IMAGEN, EXTENSIONES_PDF,
     FacturaExtractor, ResultadoExtraccion,
 )
@@ -428,13 +428,39 @@ class ProcesadorLote:
             informe.filas.append(fila)
             icono = {"válida": "✅", "incompleta": "⚠️ ", "error": "❌"}.get(fila.estado, "?")
             logger.info(f"  {icono} {fila.estado}  (confianza: {fila.confianza:.0%})")
+
+        # ── Detección de duplicados ───────────────────────────────────────────
+        vistos: dict[tuple, str] = {}
+        for fila in informe.filas:
+            if fila.estado == "error":
+                continue
+            nif    = fila.datos.get("nif_emisor")
+            numero = fila.datos.get("numero_factura")
+            if not nif or not numero:
+                continue
+            clave = (str(nif).upper().strip(), str(numero).upper().strip())
+            if clave in vistos:
+                aviso = f"POSIBLE FACTURA DUPLICADA (mismo NIF+numero que {vistos[clave]})"
+                if aviso not in fila.advertencias:
+                    fila.advertencias.append(aviso)
+                fila.error_log = (fila.error_log + "; " + aviso).lstrip("; ")
+            else:
+                vistos[clave] = fila.archivo
         return informe
 
     def _procesar_uno(self, ruta: Path) -> FilaFactura:
         try:
             resultado: ResultadoExtraccion = self.extractor.extraer_archivo(ruta)
-            estado    = "válida" if resultado.es_valida() else "incompleta"
+            estado = "válida" if resultado.es_valida() else "incompleta"
             error_log = "; ".join(resultado.advertencias) if resultado.advertencias else ""
+            
+            # Si es incompleta, añadir qué campos faltan al log
+            if estado == "incompleta":
+                from core.extractor import CAMPOS_REQUERIDOS
+                vacios = [c for c in CAMPOS_REQUERIDOS if not resultado.datos.get(c)]
+                if vacios:
+                    nota_vacios = "Campos requeridos sin valor: " + ", ".join(vacios)
+                    error_log = (error_log + "; " + nota_vacios).lstrip("; ")
             return FilaFactura(
                 archivo=ruta.name, datos=resultado.datos,
                 estado=estado, confianza=resultado.confianza,
